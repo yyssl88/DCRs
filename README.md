@@ -1,2 +1,2 @@
 # DCRs
-The source code of DCRs
+The source code of DCRs (VLDB submission)
