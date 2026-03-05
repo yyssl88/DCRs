@@ -5,6 +5,10 @@ The source code of DCRs (VLDB submission)
 - MCTS + policy learning
 - ML models, e.g., M_R, M_U
 
+## Dataset
+The following link is the dataset folder, including: Amazon, Fakeddit, Goodreads, ml25m, PAD-UFES-20.
+https://drive.google.com/drive/folders/1xWE6aXvPYZDYndStudiRzN3pA5CEX0yC?usp=drive_link
+
 The following is source code for PAD dataset; for other datasets, the code is in "dcrs-others" directory.
 
 ## 🚀 Quick Start
@@ -52,3 +56,4 @@ The program automatically runs evaluation on `test_dirty.csv` after rule discove
 
 * **Logic:** Based on **AND Semantics** (an error is flagged only if *all* applicable rules identify it as such).
 * **Output:** Precision, Recall, F1-score.
+
