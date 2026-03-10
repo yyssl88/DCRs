@@ -37,7 +37,7 @@ class DCRConfig:
     MU_NOISE_DIR = os.path.join(DATA_DIR, "outputs", "mu_noise")
     FIXED_CLEAN_MR_PATH = "/data_nas/DCR/split_addnoise/pad_mu/data/mr_outputs_cluster3/noise_00/mr_metadata_train_augmented.csv"
     TEST_MR_DIR = "/data_nas/DCR/split_addnoise/pad_mu/data/mr_outputs_cluster3/noise_00"
-    OUT_DIR = os.path.join(DATA_DIR, "dcr_final_results222")
+    OUT_DIR = os.path.join(DATA_DIR, "dcr_final_results")
     
     # Discovery Parameters
     # Sigma: Paper uses 1e-6 * |D|^2 for count, or just probability.
@@ -45,13 +45,13 @@ class DCRConfig:
     # If |D|=1000, 1 pair is 1/10^6. So threshold should be around 1e-6 to 1e-4.
     SUPPORT_THRESHOLD = 0.001   # Sigma (Probability, strictly [0,1])
     CONF_THRESHOLD = 0.8        # Delta (Probability, strictly [0,1])
-    MAX_DEPTH = 4               # Eta
+    MAX_DEPTH = 7               # Eta
     
     # MCTS Parameters
-    OUTER_ITERATIONS = 7
+    OUTER_ITERATIONS = 6
     MCTS_ITERATIONS = 1000
-    C_PARAM = 1.5              # c (Exploration weight)
-    ALPHA = 0.8                # Balancing parameter
+    C_PARAM = 1.6              # c (Exploration weight)
+    ALPHA = 1.0                # Balancing parameter
     
     # Training
     HIDDEN_DIM = 512
@@ -377,36 +377,51 @@ def encode_state(premise, action_map, action_size):
             vec[action_map[p]] = 1.0
     return vec
 
-def calculate_reward(support, confidence, premise, consequence):
-    """
-    Paper Section 5.2.3 (Modified):
-    Reward logic:
-    1. Hard thresholding for validity.
-    2. Differential reward based on predicate type (Constant vs Non-Constant).
-    """
-    # 1. Basic Validity Check (Hard Threshold)
-    if support < DCRConfig.SUPPORT_THRESHOLD or confidence < DCRConfig.CONF_THRESHOLD:
-        return 0.0
+# def calculate_reward(support, confidence, premise, consequence):
+#     """
+#     Paper Section 5.2.3 (Modified):
+#     Reward logic:
+#     1. Hard thresholding for validity.
+#     2. Differential reward based on predicate type (Constant vs Non-Constant).
+#     """
+#     # 1. Basic Validity Check (Hard Threshold)
+#     if support < DCRConfig.SUPPORT_THRESHOLD or confidence < DCRConfig.CONF_THRESHOLD:
+#         return 0.0
 
-    # 2. Check for Non-Constant (Binary) Predicates
-    # If any predicate in premise or the consequence is 'binary', it's a non-constant rule.
-    has_binary = False
+#     # 2. Check for Non-Constant (Binary) Predicates
+#     # If any predicate in premise or the consequence is 'binary', it's a non-constant rule.
+#     has_binary = False
     
-    if consequence.type == 'binary':
-        has_binary = True
-    else:
-        for p in premise:
-            if p.type == 'binary':
-                has_binary = True
-                break
+#     if consequence.type == 'binary':
+#         has_binary = True
+#     else:
+#         for p in premise:
+#             if p.type == 'binary':
+#                 has_binary = True
+#                 break
 
-    # 3. Assign Reward based on type
-    if has_binary:
-        # for non-constant predicates
-        return 0.001 
-    else:
-        # for constant predicates
-        return 1.0
+#     # 3. Assign Reward based on type
+#     if has_binary:
+#         # for non-constant predicates
+#         return 0.001 
+#     else:
+#         # for constant predicates
+#         return 1.0
+
+def calculate_reward(support, confidence, premise, consequence):
+    # 依然可以保留一个兜底的门槛，滤除彻头彻尾的垃圾规则
+    if support < DCRConfig.SUPPORT_THRESHOLD or confidence < 0.5:
+        return 0.0
+        
+    # [修改点]：不再返回硬性的 1.0，而是返回一个 0 到 1 之间浮动的连续分数
+    # 目前使用的是最简单的做法：直接返回 confidence (范围 [0, 1])。
+    # 更进阶的做法：综合考虑 confidence 和 support (这里用了类似 F1 的调和或者加权)，我们希望既有高置信度，又有不错的覆盖率：
+    # 因为 support 通常很小 (比如 0.05)，所以可以把它适当放大来参与计算，比如：reward = confidence * (support / 0.1) 但需截断在 1.0 以内
+    
+    continuous_reward = float(confidence) 
+    
+    # 确保网络价值头 (Value Head) 的 MSE Loss 计算不会越界
+    return min(continuous_reward, 1.0)
 
 def worker_mcts_search(args):
     """
@@ -440,7 +455,11 @@ def worker_mcts_search(args):
                 "img_visual_cluster",
                 "border_type",
                 "surface_type",
-                "color_pattern"
+                "color_pattern",
+                "has_artifact_hair",       # <--- 新增
+                "has_artifact_ruler",      # <--- 新增
+                "has_artifact_marker",     # <--- 新增
+                "has_artifact_reflection"  # <--- 新增
             }
             valid_indices = [
                 i for i in potential
@@ -580,7 +599,7 @@ def train_agent(agent, memory, optimizer, action_size):
         value_loss = F.mse_loss(values, reward_tensor)
         
         # 2. Policy Loss: Maximize log_prob(a|s) for Valid Trajectories ONLY
-        # STRICT CHANGE: No advantage. Filter by reward=1.0
+        # No advantage. Filter by reward=1.0
         # Formula: - E_{M} [ log P(a|s) ]
         
         log_probs = F.log_softmax(logits, dim=1)
@@ -605,7 +624,7 @@ def train_agent(agent, memory, optimizer, action_size):
 
 # =========================================================
 # 7. Evaluation (Error Detection)
-# =========================================================
+# =========================================================  
 def is_all_unary_predicate(premise: str) -> bool:
     """判断规则前件是否全部为一元谓词，无二元谓词"""
     binary_pattern = re.compile(r't\d+\.\w+\s*==\s*t\d+\.\w+')
@@ -799,8 +818,7 @@ def calculate_f1_score(df_dirty, df_clean, df_train, rules):
             "pred_cnt": pred_cnt,
             "tp_cnt": tp_cnt,
             "fp_cnt": fp_cnt,
-            "rule_precision": tp_cnt / pred_cnt if pred_cnt > 0 else 0.0,
-            "rule_fp_rate": fp_cnt / pred_cnt if pred_cnt > 0 else 0.0
+            "rule_precision": tp_cnt / pred_cnt if pred_cnt > 0 else 0.0
         })
 
     # 3. AND 判错聚合
@@ -844,17 +862,19 @@ def generate_action_space(df):
     # [Hard Filter] 明确的黑名单：这些列不参与规则生成
     # 根据你的json文件分析，这些列产生了大量废话
     IGNORE_COLS = [
-        "img_id", "patient_id", "lesion_id"
+        "img_id", "patient_id", "lesion_id",
+        "has_piped_water", "has_sewage_system", 
+        "pesticide"
     ]
 
     BANNED_FEATURES = DCRConfig.TARGET_COLS  # ["diagnostic"]
     
     # [Soft Filter] 最小频次阈值
     # 一个值至少要在 3% 的数据中出现，才配做成规则。
-    # 比如 1000 条数据，至少要有 30 条。杀掉 'NORWAY' (3条) 这种规则。
+    # 比如 1000 条数据，至少要有 20 条。杀掉 'NORWAY' (2条) 这种规则。
     valid_cols = [c for c in df.columns if c not in IGNORE_COLS and c not in BANNED_FEATURES]
     
-    min_count = len(df) * 0.03
+    min_count = len(df) * 0.02
     print(f"[Action Space] Filtering columns. Ignored: {IGNORE_COLS}")
     print(f"[Action Space] Min value count threshold: {min_count:.1f}")
 
@@ -866,7 +886,7 @@ def generate_action_space(df):
     cat_cols = [
         c for c in valid_cols 
         if c not in num_cols 
-        and df[c].nunique() < 30 
+        and df[c].nunique() < 20 
     ]
 
     print(f"[Action Space] Filtering columns. Ignored: {IGNORE_COLS}")
@@ -899,7 +919,7 @@ def generate_action_space(df):
         if len(series) == 0: continue
         
         # 使用 3 分位数 (25%, 50%, 75%)，保证切分点有物理意义
-        quantiles = [0.5]
+        quantiles = [0.25, 0.5, 0.75]
         bins = series.quantile(quantiles).unique()
         
         for v in bins:
@@ -918,6 +938,33 @@ def generate_action_space(df):
 def get_df_hash(df):
     # 将 dataframe 转换为 json 字符串计算 hash，确保内容一致
     return hashlib.md5(pd.util.hash_pandas_object(df, index=True).values).hexdigest()
+
+def preprocess_mu_data(df_mu):
+    """
+    针对 MU 大模型输出结果的数据清洗：
+    1. 剔除 reasoning 自由文本
+    2. 将 unknown 转为缺失值，避免生成无意义规则
+    3. 将 artifacts_present 列表展开为多个 Boolean 列
+    """
+    # 1. 移除文本列
+    if "reasoning" in df_mu.columns:
+        df_mu = df_mu.drop(columns=["reasoning"])
+        
+    # 2. 将 unknown 替换为空值
+    df_mu = df_mu.replace(["unknown", "UNKNOWN"], np.nan)
+    
+    # 3. 展开 artifacts_present 为多热编码布尔列
+    if "artifacts_present" in df_mu.columns:
+        # 确保数据格式为列表，防止报错
+        s = df_mu["artifacts_present"].apply(lambda x: x if isinstance(x, list) else [])
+        
+        # 你可以根据实际情况增删这个列表，或者动态提取。这里写死 4 个常见的：
+        for art in ["hair", "ruler", "marker", "reflection"]:
+            df_mu[f"has_artifact_{art}"] = s.apply(lambda x: art in x)
+            
+        df_mu = df_mu.drop(columns=["artifacts_present"])
+        
+    return df_mu
 
 def main():
     setup_seed(42)
@@ -970,6 +1017,7 @@ def main():
             optimizer = optim.Adam(global_agent.parameters(), lr=DCRConfig.LEARNING_RATE)
             memory = deque(maxlen=DCRConfig.MEMORY_SIZE)
             
+            # Targets (Crucial Fix: Add alias='t1')
             p0_candidates = []
             for col in DCRConfig.TARGET_COLS:
                 if col in df.columns:
@@ -979,7 +1027,7 @@ def main():
             
             best_rules_global = {}
 
-            # 3. Training Loop
+            # 3. Outer Training Loop
             for outer_iter in range(DCRConfig.OUTER_ITERATIONS):
                 print(f"\n--- Outer Iteration {outer_iter+1}/{DCRConfig.OUTER_ITERATIONS} ---")
                 
@@ -1006,7 +1054,7 @@ def main():
                 loss = train_agent(global_agent, list(memory), optimizer, action_size)
                 print(f"[INFO] Training Loss: {loss:.4f}")
             
-            # 4. Save Results
+            # 4. Save Final Results
             final_rules = list(best_rules_global.values())
             final_rules.sort(key=lambda x: x['confidence'], reverse=True)
             
@@ -1023,6 +1071,7 @@ def main():
             # =========================================================
             print(f"\n--- Evaluating on Test Data ({noise_tag}) ---")
             
+            # Filter Rules (Removing blocked columns)
             filter_cols = []
             original_count = len(final_rules)
             final_rules = [
@@ -1030,13 +1079,29 @@ def main():
                 if not any(col in r['premise'] or col in r['consequence'] for col in filter_cols)
             ]
             print(f"[FILTER] Removed {original_count - len(final_rules)} rules containing blocked columns.")
+            if len(final_rules) > 0:
+                # 1. 排序：优先保留最强规则 (Confidence高, Support高)
+                # 这样即使截断，留下的也是最硬核的规则
+                final_rules.sort(key=lambda x: (x['support'], x['confidence']), reverse=True)
+                
+                print(f"[DEBUG] Top-1 Rule: {final_rules[0]['premise']} -> {final_rules[0]['consequence']}")
+                
+                # 2. 【关键】Top-K 截断
+                # 规则越多，AND 逻辑下漏报（False Negative）的概率越大。
+                TOP_K = 600  
+                if len(final_rules) > TOP_K:
+                    print(f"[FILTER] ✂️ Truncating from {len(final_rules)} to Top-{TOP_K} rules for robustness!")
+                    final_rules = final_rules[:TOP_K]
+            
             print(f"[FILTER] Final Rule Count for Eval: {len(final_rules)}")
 
             # Load Test Data
             dirty_path = os.path.join(DCRConfig.TEST_MR_DIR, "mr_metadata_test_dirty_augmented.csv")
             clean_path = os.path.join(DCRConfig.TEST_MR_DIR, "mr_metadata_test_clean_augmented.csv")
             
-            if not os.path.exists(dirty_path): continue
+            if not os.path.exists(dirty_path): 
+                print(f"[WARN] Test Dirty file not found: {dirty_path}. Skipping evaluation.")
+                continue
                 
             df_test_dirty = pd.read_csv(dirty_path)
             df_test_clean = pd.read_csv(clean_path)
@@ -1050,6 +1115,11 @@ def main():
             df_test_dirty = df_test_dirty.sort_values("img_id").reset_index(drop=True)
             df_test_clean = df_test_clean.sort_values("img_id").reset_index(drop=True)
 
+            if not df_test_dirty['img_id'].equals(df_test_clean['img_id']):
+                print("[ERR] CRITICAL ALIGNMENT ERROR: IDs do not match!")
+                continue
+
+            # Run Evaluation
             p, r, f1, rule_stats = calculate_f1_score(df_test_dirty, df_test_clean, df, final_rules)
             
             print(f"\n{'='*40}")
@@ -1059,16 +1129,17 @@ def main():
             print(f"F1 Score  : {f1:.4f}")
             print(f"{'='*40}\n")
             
+            # Save Metrics
             metrics = {"noise": noise_tag, "precision": p, "recall": r, "f1": f1}
             with open(os.path.join(DCRConfig.OUT_DIR, f"metrics_{noise_tag}.json"), 'w') as f:
                 json.dump(metrics, f, indent=2)
+
             # Save Rule Stats
             rule_stats = sorted(rule_stats, key=lambda x: x.get("fp_cnt", 0.0), reverse=True)
             stat_path = os.path.join(DCRConfig.OUT_DIR, f"rule_stats_{noise_val}.json")
             with open(stat_path, "w") as f:
                 json.dump(rule_stats, f, indent=2, ensure_ascii=False)
             print(f"[INFO] Rule FP stats saved to {stat_path}")
-
 
 if __name__ == "__main__":
     main()
